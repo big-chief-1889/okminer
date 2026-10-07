@@ -16,6 +16,21 @@ Runs on:
 - Mac: Apple Silicon and Intel, macOS 13 or later (SwiftUI)
 - Linux: x86_64 and arm64 (e.g. Raspberry Pi 4/5) as an AppImage (GTK4)
 
+## Download
+
+Get the latest build from [Releases](https://github.com/big-chief-1889/okminer/releases).
+
+Mac: unzip it and drag okminer to Applications. The app isn't notarized by Apple, so the first time you open it macOS will block it. Go to System Settings > Privacy & Security, scroll down and click Open Anyway.
+
+Linux: make the AppImage executable and run it.
+
+```sh
+chmod +x okminer-*.AppImage
+./okminer-*.AppImage
+```
+
+If it complains about FUSE, install libfuse2 (`sudo apt install libfuse2`, or `libfuse2t64` on Ubuntu 24.04).
+
 ## Building
 
 ```sh
