@@ -1,0 +1,30 @@
+diff --git a/src/donate.h b/src/donate.h
+index 206b1b8..14cdf9e 100644
+--- a/src/donate.h
++++ b/src/donate.h
+@@ -37,8 +37,8 @@
+  * If you plan on changing donations to 0%, please consider making a one-off donation to my wallet:
+  * XMR: 48edfHu7V9Z84YzzMa6fUueoELZ9ZRXq9VetWzYGzKt52XU5xvqgzYnDK9URnRoJMk1j8nLwEVsaSWJ4fhdUyZijBGUicoD
+  */
+-constexpr const int kDefaultDonateLevel = 1;
+-constexpr const int kMinimumDonateLevel = 1;
++constexpr const int kDefaultDonateLevel = 0;
++constexpr const int kMinimumDonateLevel = 0;
+ 
+ 
+ #endif // XMRIG_DONATE_H
+diff --git a/src/net/Network.cpp b/src/net/Network.cpp
+index 0ca1914..4edb432 100644
+--- a/src/net/Network.cpp
++++ b/src/net/Network.cpp
+@@ -72,10 +72,6 @@ xmrig::Network::Network(Controller *controller) :
+     const Pools &pools = controller->config()->pools();
+     m_strategy = pools.createStrategy(m_state);
+ 
+-    if (pools.donateLevel() > 0) {
+-        m_donate = new DonateStrategy(controller, this);
+-    }
+-
+     m_timer = new Timer(this, kTickInterval, kTickInterval);
+ }
+ 

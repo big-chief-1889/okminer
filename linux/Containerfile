@@ -1,0 +1,10 @@
+# Build environment for linux/build.sh. Ubuntu 22.04 keeps glibc old enough
+# for the AppImage to run on most current distros.
+FROM docker.io/library/ubuntu:22.04
+RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+      build-essential cmake git curl ca-certificates pkg-config file patchelf \
+      libgtk-4-dev libglib2.0-bin librsvg2-common libuv1-dev libssl-dev libhwloc-dev \
+    && rm -rf /var/lib/apt/lists/*
+RUN curl -fsSL https://sh.rustup.rs | sh -s -- -y --profile minimal
+ENV PATH=/root/.cargo/bin:$PATH
+RUN git config --global --add safe.directory '*'

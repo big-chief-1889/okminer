@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=okminer
+Comment=Mine Monero with XMRig
+Exec=okminer
+Icon=okminer
+Terminal=false
+Categories=Utility;
