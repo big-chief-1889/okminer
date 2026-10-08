@@ -1,0 +1,9 @@
+# Build environment for windows/build.sh: MinGW cross-compilers and
+# Fedora's prebuilt Windows GTK4.
+FROM docker.io/library/fedora:42
+RUN dnf -y install mingw64-gcc mingw64-gcc-c++ mingw64-winpthreads-static mingw64-gtk4 \
+      cmake make git curl findutils zip glib2 perl \
+    && dnf clean all
+RUN curl -fsSL https://sh.rustup.rs | sh -s -- -y --profile minimal --target x86_64-pc-windows-gnu
+ENV PATH=/root/.cargo/bin:$PATH
+RUN git config --global --add safe.directory '*'

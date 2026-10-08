@@ -1,4 +1,5 @@
-// okminer for Linux: GTK4 front end for the bundled xmrig.
+// okminer for Linux and Windows: GTK4 front end for the bundled xmrig.
+#![windows_subsystem = "windows"]
 
 use gtk::prelude::*;
 use gtk::{gdk, gio, glib};
@@ -17,6 +18,7 @@ use std::time::{Duration, Instant};
 const APP_ID: &str = "local.okminer";
 const DEFAULT_WALLET: &str = "48KJ3jAyp7j7B2oU4p46VN4eDqcF2LGLufPg8ZJgmLeQKAvPa75KUgB5VQsQYbPtL7Fru6o75LMEoeWqcLoAjMP49Vi5iDi";
 const DEFAULT_WORKER: &str = "okminer";
+const XMRIG: &str = if cfg!(windows) { "xmrig.exe" } else { "xmrig" };
 
 // MARK: pools
 
@@ -115,34 +117,144 @@ fn cores() -> u32 {
     thread::available_parallelism().map_or(1, |n| n.get() as u32)
 }
 
+// MARK: process control
+
+#[cfg(unix)]
+mod process {
+    /// The running xmrig process, controlled with signals.
+    pub struct Proc(i32);
+
+    impl Proc {
+        pub fn open(pid: u32) -> Option<Proc> {
+            Some(Proc(pid as i32))
+        }
+        fn signal(&self, sig: i32) -> bool {
+            unsafe { libc::kill(self.0, sig) == 0 }
+        }
+        pub fn pause(&self) {
+            self.signal(libc::SIGSTOP);
+        }
+        pub fn resume(&self) {
+            self.signal(libc::SIGCONT);
+        }
+        /// Ask xmrig to shut down cleanly.
+        pub fn interrupt(&self) {
+            self.signal(libc::SIGINT);
+        }
+        pub fn terminate(&self) {
+            self.signal(libc::SIGTERM);
+        }
+        pub fn kill(&self) {
+            self.signal(libc::SIGKILL);
+        }
+        pub fn alive(&self) -> bool {
+            self.signal(0)
+        }
+    }
+
+    /// GTK's inhibit covers this on Linux.
+    pub fn keep_awake(_on: bool) {}
+}
+
+#[cfg(windows)]
+mod process {
+    use std::ffi::c_void;
+    type Handle = *mut c_void;
+
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn OpenProcess(access: u32, inherit: i32, pid: u32) -> Handle;
+        fn CloseHandle(h: Handle) -> i32;
+        fn TerminateProcess(h: Handle, code: u32) -> i32;
+        fn WaitForSingleObject(h: Handle, ms: u32) -> u32;
+        fn SetThreadExecutionState(flags: u32) -> u32;
+    }
+    // undocumented but stable since XP; what Process Explorer uses to suspend
+    #[link(name = "ntdll")]
+    extern "system" {
+        fn NtSuspendProcess(h: Handle) -> i32;
+        fn NtResumeProcess(h: Handle) -> i32;
+    }
+
+    const PROCESS_TERMINATE: u32 = 0x0001;
+    const PROCESS_SUSPEND_RESUME: u32 = 0x0800;
+    const SYNCHRONIZE: u32 = 0x0010_0000;
+    const WAIT_TIMEOUT: u32 = 0x102;
+
+    /// The running xmrig process, controlled through a process handle.
+    pub struct Proc(Handle);
+    unsafe impl Send for Proc {}
+    unsafe impl Sync for Proc {}
+
+    impl Proc {
+        pub fn open(pid: u32) -> Option<Proc> {
+            let h = unsafe { OpenProcess(PROCESS_TERMINATE | PROCESS_SUSPEND_RESUME | SYNCHRONIZE, 0, pid) };
+            (!h.is_null()).then_some(Proc(h))
+        }
+        pub fn pause(&self) {
+            unsafe { NtSuspendProcess(self.0) };
+        }
+        pub fn resume(&self) {
+            unsafe { NtResumeProcess(self.0) };
+        }
+        /// Windows has no SIGINT for a windowless process; xmrig has nothing to save anyway.
+        pub fn interrupt(&self) {
+            self.kill();
+        }
+        pub fn terminate(&self) {
+            self.kill();
+        }
+        pub fn kill(&self) {
+            unsafe { TerminateProcess(self.0, 1) };
+        }
+        pub fn alive(&self) -> bool {
+            unsafe { WaitForSingleObject(self.0, 0) == WAIT_TIMEOUT }
+        }
+    }
+
+    impl Drop for Proc {
+        fn drop(&mut self) {
+            unsafe { CloseHandle(self.0) };
+        }
+    }
+
+    pub fn keep_awake(on: bool) {
+        const ES_CONTINUOUS: u32 = 0x8000_0000;
+        const ES_SYSTEM_REQUIRED: u32 = 0x0000_0001;
+        unsafe { SetThreadExecutionState(if on { ES_CONTINUOUS | ES_SYSTEM_REQUIRED } else { ES_CONTINUOUS }) };
+    }
+}
+
+use process::Proc;
+
 // MARK: throttle
 
-/// XMRig has no throttle, so pause/resume the process with SIGSTOP/SIGCONT
-/// every 100 ms, letting it run for `duty` percent of each period.
+/// XMRig has no throttle, so pause/resume the process every 100 ms,
+/// letting it run for `duty` percent of each period.
 struct Throttler {
     duty: Arc<AtomicU32>,
     running: Arc<AtomicBool>,
     handle: Option<thread::JoinHandle<()>>,
-    pid: i32,
+    proc: Arc<Proc>,
 }
 
 impl Throttler {
-    fn new(pid: i32, duty: u32) -> Throttler {
+    fn new(proc: Arc<Proc>, duty: u32) -> Throttler {
         let duty = Arc::new(AtomicU32::new(duty));
         let running = Arc::new(AtomicBool::new(true));
-        let (d, r) = (duty.clone(), running.clone());
+        let (d, r, p) = (duty.clone(), running.clone(), proc.clone());
         let handle = thread::spawn(move || {
             while r.load(Ordering::Relaxed) {
-                unsafe { libc::kill(pid, libc::SIGCONT) };
+                p.resume();
                 let on = d.load(Ordering::Relaxed).min(100) as u64;
                 thread::sleep(Duration::from_millis(on));
                 if on < 100 && r.load(Ordering::Relaxed) {
-                    unsafe { libc::kill(pid, libc::SIGSTOP) };
+                    p.pause();
                     thread::sleep(Duration::from_millis(100 - on));
                 }
             }
         });
-        Throttler { duty, running, handle: Some(handle), pid }
+        Throttler { duty, running, handle: Some(handle), proc }
     }
 
     fn set_duty(&self, percent: u32) {
@@ -155,7 +267,7 @@ impl Throttler {
         if let Some(h) = self.handle.take() {
             let _ = h.join();
         }
-        unsafe { libc::kill(self.pid, libc::SIGCONT) };
+        self.proc.resume();
     }
 }
 
@@ -178,7 +290,8 @@ enum StatusKind {
 
 #[derive(Default)]
 struct Miner {
-    pid: Option<i32>,
+    pid: Option<u32>,
+    proc: Option<Arc<Proc>>,
     throttler: Option<Throttler>,
     alive: Option<Arc<AtomicBool>>, // stops the stats poller
     stopping: bool,
@@ -188,16 +301,21 @@ struct Miner {
     inhibit_cookie: Option<u32>,
 }
 
+/// Random hex from std's OS-seeded hasher keys (no /dev/urandom on Windows).
 fn random_hex(bytes: usize) -> String {
-    let mut buf = vec![0u8; bytes];
-    if let Ok(mut f) = std::fs::File::open("/dev/urandom") {
-        let _ = f.read_exact(&mut buf);
-    }
-    buf.iter().map(|b| format!("{b:02x}")).collect()
+    use std::hash::{BuildHasher, Hasher};
+    let hex: String = (0..bytes.div_ceil(8))
+        .map(|i| {
+            let mut h = std::collections::hash_map::RandomState::new().build_hasher();
+            h.write_usize(i);
+            format!("{:016x}", h.finish())
+        })
+        .collect();
+    hex[..bytes * 2].to_string()
 }
 
 fn xmrig_path() -> Option<PathBuf> {
-    let p = std::env::current_exe().ok()?.parent()?.join("xmrig");
+    let p = std::env::current_exe().ok()?.parent()?.join(XMRIG);
     p.exists().then_some(p)
 }
 
@@ -314,9 +432,9 @@ impl App {
         ui.pool_caption.set_text(&format!("{} · TLS", pool.url));
         let pool_ok = !custom || pool_looks_valid(&pool.url);
         if custom && !pool.url.is_empty() && !pool_ok {
-            set_caption(&ui.custom_caption, "Enter the pool as host:port, e.g. pool.example.com:3333.", true);
+            set_caption(&ui.custom_caption, "Enter the pool as host:port, e.g. pool.example.com:3333.", Some("error"));
         } else if custom && !pool.tls {
-            set_caption(&ui.custom_caption, "Without TLS your wallet address and shares are sent unencrypted.", false);
+            set_caption(&ui.custom_caption, "Without TLS your wallet address and shares are sent unencrypted.", None);
         } else {
             ui.custom_caption.set_visible(false);
         }
@@ -324,9 +442,14 @@ impl App {
         let wallet_ok = wallet_looks_valid(&wallet);
         if wallet.is_empty() {
             let short = format!("{}…{}", &DEFAULT_WALLET[..8], &DEFAULT_WALLET[DEFAULT_WALLET.len() - 6..]);
-            set_caption(&ui.wallet_caption, &format!("Empty: mining to the default address {short}"), false);
+            set_caption(&ui.wallet_caption, &format!("Empty: mining to the default address {short}"), None);
         } else if !wallet_ok {
-            set_caption(&ui.wallet_caption, "That doesn't look like a Monero address (95 characters, starts with 4 or 8).", true);
+            // rental services and some pools log in with a username instead
+            set_caption(
+                &ui.wallet_caption,
+                "Not a Monero address. That's fine for a username (e.g. MiningRigRentals), but a normal pool needs your address or the coins won't reach you.",
+                Some("warning"),
+            );
         } else {
             ui.wallet_caption.set_visible(false);
         }
@@ -347,9 +470,9 @@ impl App {
         } else {
             ui.start.remove_css_class("stop");
         }
-        ui.start.set_sensitive(running || (wallet_ok && pool_ok));
+        ui.start.set_sensitive(running || pool_ok);
 
-        ui.footer.set_visible(pool.stats_page.is_some());
+        ui.footer.set_visible(pool.stats_page.is_some() && wallet_ok);
         ui.footer.set_label(&format!("Find your coins on {} ↗", pool.name));
     }
 
@@ -389,6 +512,11 @@ impl App {
             cmd.arg("--tls");
         }
         cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+        }
 
         let mut child = match cmd.spawn() {
             Ok(c) => c,
@@ -397,7 +525,12 @@ impl App {
                 return;
             }
         };
-        let pid = child.id() as i32;
+        let pid = child.id();
+        let Some(proc) = Proc::open(pid).map(Arc::new) else {
+            let _ = child.kill();
+            self.set_status("Couldn't control the miner process.", StatusKind::Error);
+            return;
+        };
 
         // stdout/stderr lines, the exit, and API stats all come back through the channel
         for stream in [child.stdout.take().map(|s| Box::new(s) as Box<dyn Read + Send>),
@@ -433,9 +566,11 @@ impl App {
             gtk::ApplicationInhibitFlags::IDLE | gtk::ApplicationInhibitFlags::SUSPEND,
             Some("Mining Monero"),
         );
+        process::keep_awake(true);
         *self.miner.borrow_mut() = Miner {
             pid: Some(pid),
-            throttler: Some(Throttler::new(pid, throttle)),
+            proc: Some(proc.clone()),
+            throttler: Some(Throttler::new(proc, throttle)),
             alive: Some(alive),
             pool_name: pool.name.clone(),
             inhibit_cookie: (cookie != 0).then_some(cookie),
@@ -449,17 +584,17 @@ impl App {
 
     fn stop(self: &Rc<Self>) {
         let mut m = self.miner.borrow_mut();
-        let Some(pid) = m.pid else { return };
+        let (Some(pid), Some(proc)) = (m.pid, m.proc.clone()) else { return };
         m.stopping = true;
         if let Some(mut t) = m.throttler.take() {
             t.invalidate(); // a stopped process won't see SIGINT
         }
         drop(m);
-        unsafe { libc::kill(pid, libc::SIGINT) };
+        proc.interrupt();
         let this = self.clone();
         glib::timeout_add_local_once(Duration::from_secs(3), move || {
             if this.miner.borrow().pid == Some(pid) {
-                unsafe { libc::kill(pid, libc::SIGTERM) };
+                proc.terminate();
             }
         });
     }
@@ -467,17 +602,20 @@ impl App {
     /// Used on quit so the miner isn't left running.
     fn stop_blocking(&self) {
         let mut m = self.miner.borrow_mut();
-        let Some(pid) = m.pid else { return };
+        let Some(proc) = m.proc.clone() else { return };
         m.stopping = true;
         if let Some(mut t) = m.throttler.take() {
             t.invalidate();
         }
-        unsafe { libc::kill(pid, libc::SIGINT) };
+        proc.interrupt();
         let deadline = Instant::now() + Duration::from_secs(3);
-        while unsafe { libc::kill(pid, 0) } == 0 && Instant::now() < deadline {
+        while proc.alive() && Instant::now() < deadline {
             thread::sleep(Duration::from_millis(50));
         }
-        unsafe { libc::kill(pid, libc::SIGKILL) };
+        if proc.alive() {
+            proc.kill();
+        }
+        process::keep_awake(false);
     }
 
     fn handle(self: &Rc<Self>, event: Event) {
@@ -516,6 +654,7 @@ impl App {
                 if let Some(c) = m.inhibit_cookie {
                     self.app.uninhibit(c);
                 }
+                process::keep_awake(false);
                 if m.stopping {
                     self.set_status("Stopped", StatusKind::Idle);
                 } else {
@@ -559,13 +698,15 @@ impl App {
     }
 }
 
-fn set_caption(label: &gtk::Label, text: &str, error: bool) {
+/// `tone` is a CSS class for the caption colour: "error", "warning" or none.
+fn set_caption(label: &gtk::Label, text: &str, tone: Option<&str>) {
     label.set_text(text);
     label.set_visible(true);
-    if error {
-        label.add_css_class("error");
-    } else {
-        label.remove_css_class("error");
+    for c in ["error", "warning"] {
+        label.remove_css_class(c);
+    }
+    if let Some(c) = tone {
+        label.add_css_class(c);
     }
 }
 
@@ -643,6 +784,7 @@ window.okminer { background: @ground; }
 .okminer .value { color: @ink; font-size: 13px; font-weight: 600; font-feature-settings: 'tnum'; }
 .okminer .caption { color: @dust; font-size: 11.5px; }
 .okminer .caption.error { color: @redrock; }
+.okminer .caption.warning { color: @wheat; }
 .okminer entry { background: @inset; border: 1px solid @line; border-radius: 8px; color: @ink; box-shadow: none;
     padding: 4px 10px; }
 .okminer entry.mono { font-family: monospace; font-size: 12px; }

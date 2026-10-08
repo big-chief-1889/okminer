@@ -19,7 +19,7 @@ cmake -S xmrig -B "xmrig/build-linux-$ARCH" -DCMAKE_BUILD_TYPE=Release -DWITH_OP
 cmake --build "xmrig/build-linux-$ARCH" -j"$(nproc)"
 
 RUSTFLAGS="--remap-path-prefix=$ROOT=okminer --remap-path-prefix=$HOME=~" \
-  cargo build --release --manifest-path linux/Cargo.toml --target-dir "build/linux-target-$ARCH"
+  cargo build --release --manifest-path gtk/Cargo.toml --target-dir "build/linux-target-$ARCH"
 
 rm -rf "$APPDIR" && mkdir -p "$APPDIR/usr/bin" "$TOOLS" "$OUT"
 cp "build/linux-target-$ARCH/release/okminer" "xmrig/build-linux-$ARCH/xmrig" "$APPDIR/usr/bin/"

@@ -423,7 +423,7 @@ struct ContentView: View {
                 }
             }
             .buttonStyle(PillButtonStyle(fill: Mesa.cream, text: miner.isRunning ? Mesa.redRock : Mesa.clay))
-            .disabled(!miner.isRunning && !(walletLooksValid && poolLooksValid))
+            .disabled(!miner.isRunning && !poolLooksValid)
             .keyboardShortcut(.defaultAction)
         }
         .padding(20)
@@ -502,7 +502,8 @@ struct ContentView: View {
                 if trimmedWallet.isEmpty {
                     caption("Empty: mining to the default address \(Miner.defaultWallet.prefix(8))…\(Miner.defaultWallet.suffix(6))")
                 } else if !walletLooksValid {
-                    caption("That doesn't look like a Monero address (95 characters, starts with 4 or 8).", color: Mesa.redRock)
+                    // rental services and some pools log in with a username instead
+                    caption("Not a Monero address. That's fine for a username (e.g. MiningRigRentals), but a normal pool needs your address or the coins won't reach you.", color: Mesa.wheat)
                 }
             }
             .lockedWhileMining(miner.isRunning)
@@ -537,7 +538,7 @@ struct ContentView: View {
 
     /// Link to your stats page (custom pools don't have one).
     @ViewBuilder private var footer: some View {
-        if let statsPage = pool.statsPage {
+        if let statsPage = pool.statsPage, walletLooksValid {
             Button {
                 let address = trimmedWallet.isEmpty ? Miner.defaultWallet : trimmedWallet
                 if let url = URL(string: statsPage + address) { NSWorkspace.shared.open(url) }
